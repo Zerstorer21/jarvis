@@ -1,0 +1,573 @@
+--- a/brain.py
++++ b/brain.py
+@@ -307,13 +307,18 @@
+ 
+     @classmethod
+     def from_env(cls, home: Path) -> "BrainConfig":
++        local = bool(claude_env.local_llm_url())
+         return cls(
+             home=home,
+-            model=os.getenv("JARVIS_BRAIN_MODEL", "sonnet"),
++            model=(claude_env.local_model() if local
++                   else os.getenv("JARVIS_BRAIN_MODEL", "sonnet")),
+             effort=os.getenv("JARVIS_BRAIN_EFFORT", "low"),
+             claude_path=os.getenv("JARVIS_CLAUDE_PATH") or None,
+-            turn_timeout=float(os.getenv("JARVIS_BRAIN_TURN_TIMEOUT", "90")),
+-            context_budget=int(os.getenv("JARVIS_BRAIN_CONTEXT_BUDGET", "120000")),
++            # Un modello locale è più lento e ha un contesto più piccolo.
++            turn_timeout=float(os.getenv("JARVIS_BRAIN_TURN_TIMEOUT",
++                                         "300" if local else "90")),
++            context_budget=int(os.getenv("JARVIS_BRAIN_CONTEXT_BUDGET",
++                                         "45000" if local else "120000")),
+             user_name=os.getenv("USER_NAME", ""),
+         )
+ 
+--- a/claude_env.py
++++ b/claude_env.py
+@@ -48,11 +48,48 @@
+ STREAM_LINE_LIMIT = 64 * 1024 * 1024  # 64 MiB per line
+ 
+ 
++def local_llm_url(source: dict[str, str] | None = None) -> str:
++    """JARVIS_LOCAL_LLM_URL: se impostato (es. http://localhost:11434), ogni
++    figlio Claude Code parla con quel server compatibile Anthropic (Ollama)
++    invece che con Anthropic. Vuoto = comportamento originale."""
++    src = os.environ if source is None else source
++    return (src.get("JARVIS_LOCAL_LLM_URL") or "").strip()
++
++
++def local_model(source: dict[str, str] | None = None) -> str:
++    src = os.environ if source is None else source
++    return (src.get("JARVIS_LOCAL_MODEL") or "qwen3.5:9b").strip()
++
++
+ def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
+     """A copy of the environment with everything that would redirect or
+     re-bill a Claude Code child removed. Everything else — PATH, HOME,
+-    CLAUDE_CONFIG_DIR, the user's own variables — passes through untouched."""
++    CLAUDE_CONFIG_DIR, the user's own variables — passes through untouched.
++
++    In modalità locale lo scrub resta, poi si aggiunge SOLO il reindirizzamento
++    verso il server locale scelto dall'utente nel .env."""
+     source = os.environ if base is None else base
+-    return {k: v for k, v in source.items()
+-            if not k.startswith(SCRUBBED_ENV_PREFIXES)
+-            and k not in SCRUBBED_ENV_KEYS}
++    env = {k: v for k, v in source.items()
++           if not k.startswith(SCRUBBED_ENV_PREFIXES)
++           and k not in SCRUBBED_ENV_KEYS}
++    url = local_llm_url(source)
++    if url:
++        model = local_model(source)
++        env.update({
++            "ANTHROPIC_BASE_URL": url,
++            "ANTHROPIC_AUTH_TOKEN": "ollama",
++            "ANTHROPIC_API_KEY": "",
++            # Ogni alias (anche quelli usati dai lavori in background di
++            # Claude Code) punta al modello locale.
++            "ANTHROPIC_MODEL": model,
++            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
++            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
++            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
++            "ANTHROPIC_SMALL_FAST_MODEL": model,
++            "CLAUDE_CODE_SUBAGENT_MODEL": model,
++            # Niente telemetria, segnalazioni d'errore o aggiornamenti verso l'esterno.
++            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
++            "DISABLE_TELEMETRY": "1",
++            "DISABLE_ERROR_REPORTING": "1",
++        })
++    return env
+--- a/frontend/src/localStt.ts
++++ b/frontend/src/localStt.ts
+@@ -0,0 +1,193 @@
++/**
++ * Riconoscimento vocale locale (JARVIS_STT=local).
++ *
++ * Al posto della Web Speech API di Chrome (che manda l'audio a Google):
++ * il microfono è ascoltato qui, una frase viene isolata con un semplice
++ * rilevatore di voce a soglia di energia, convertita in WAV 16 kHz mono e
++ * mandata a POST /api/stt, dove Whisper la trascrive sul PC.
++ * Il testo torna a `onTranscript`, esattamente come faceva Chrome.
++ */
++import type { VoiceInput } from "./voice";
++
++const TARGET_RATE = 16000;
++const FRAME = 2048;                 // campioni per blocco (~43 ms a 48 kHz)
++const PREROLL_MS = 400;             // audio tenuto prima dell'inizio della voce
++const END_SILENCE_MS = 800;         // silenzio che chiude la frase
++const MIN_SPEECH_MS = 350;          // più corta di così = rumore
++const MAX_UTTERANCE_MS = 20000;
++const START_FRAMES = 3;             // blocchi consecutivi sopra soglia per iniziare
++const MIN_LEVEL = 0.012;            // soglia minima assoluta (RMS)
++
++export function createLocalVoiceInput(
++  onTranscript: (text: string) => void,
++  onInterim: (text: string) => void,
++  onError: (msg: string) => void,
++  onMicEvent: (event: string) => void = () => {}
++): VoiceInput {
++  let listening = false;
++  let paused = false;
++  let ctx: AudioContext | null = null;
++  let stream: MediaStream | null = null;
++  let node: ScriptProcessorNode | null = null;
++
++  let noise = 0.01;                 // stima del rumore di fondo
++  let loudRun = 0;
++  let recording = false;
++  let startedAt = 0;
++  let lastLoudAt = 0;
++  let chunks: Float32Array[] = [];
++  const preroll: Float32Array[] = [];
++  let inFlight = 0;
++
++  const mark = (what: string) => {
++    console.info(`[voice-local] ${new Date().toLocaleTimeString()} ${what}`);
++    onMicEvent(what);
++  };
++
++  function rms(buf: Float32Array): number {
++    let s = 0;
++    for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
++    return Math.sqrt(s / buf.length);
++  }
++
++  function downsample(input: Float32Array, rate: number): Int16Array {
++    const ratio = rate / TARGET_RATE;
++    const out = new Int16Array(Math.floor(input.length / ratio));
++    for (let i = 0; i < out.length; i++) {
++      const start = Math.floor(i * ratio);
++      const end = Math.min(input.length, Math.floor((i + 1) * ratio));
++      let sum = 0;
++      for (let j = start; j < end; j++) sum += input[j];
++      const v = Math.max(-1, Math.min(1, sum / Math.max(1, end - start)));
++      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
++    }
++    return out;
++  }
++
++  function wav(pcm: Int16Array): Blob {
++    const header = new ArrayBuffer(44);
++    const v = new DataView(header);
++    const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
++    str(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE");
++    str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
++    v.setUint32(24, TARGET_RATE, true); v.setUint32(28, TARGET_RATE * 2, true);
++    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
++    str(36, "data"); v.setUint32(40, pcm.length * 2, true);
++    return new Blob([header, pcm.buffer as ArrayBuffer], { type: "audio/wav" });
++  }
++
++  async function send(samples: Float32Array, rate: number) {
++    const body = wav(downsample(samples, rate));
++    inFlight++;
++    onInterim("…");
++    mark(`heard ${(samples.length / rate).toFixed(1)}s, transcribing locally`);
++    try {
++      const res = await fetch("/api/stt", { method: "POST", body, headers: { "Content-Type": "audio/wav" } });
++      const data = await res.json().catch(() => ({}));
++      if (!res.ok) {
++        mark(`local stt error ${res.status}: ${data.error || ""}`);
++        return;
++      }
++      const text = String(data.text || "").trim();
++      if (text) onTranscript(text);
++      else mark("local stt: nothing recognisable");
++    } catch (e) {
++      mark(`local stt request failed: ${e}`);
++    } finally {
++      inFlight--;
++    }
++  }
++
++  function finish(rate: number) {
++    recording = false;
++    const dur = Date.now() - startedAt - END_SILENCE_MS;
++    const total = chunks.reduce((n, c) => n + c.length, 0);
++    const all = new Float32Array(total);
++    let o = 0;
++    for (const c of chunks) { all.set(c, o); o += c.length; }
++    chunks = [];
++    if (dur < MIN_SPEECH_MS) return;
++    void send(all, rate);
++  }
++
++  function onAudio(buf: Float32Array, rate: number) {
++    if (!listening || paused) return;
++    const copy = new Float32Array(buf);
++    const level = rms(copy);
++    const threshold = Math.max(MIN_LEVEL, noise * 3);
++    const now = Date.now();
++
++    if (!recording) {
++      preroll.push(copy);
++      const keep = Math.ceil((PREROLL_MS / 1000) * rate / FRAME);
++      while (preroll.length > keep) preroll.shift();
++      if (level > threshold) {
++        loudRun++;
++        if (loudRun >= START_FRAMES) {
++          recording = true;
++          startedAt = now;
++          lastLoudAt = now;
++          chunks = preroll.splice(0);
++          loudRun = 0;
++        }
++      } else {
++        loudRun = 0;
++        noise = noise * 0.97 + level * 0.03;   // si adatta al rumore della stanza
++      }
++      return;
++    }
++
++    chunks.push(copy);
++    if (level > threshold) lastLoudAt = now;
++    if (now - lastLoudAt > END_SILENCE_MS || now - startedAt > MAX_UTTERANCE_MS) finish(rate);
++  }
++
++  async function open() {
++    if (ctx) return;
++    try {
++      stream = await navigator.mediaDevices.getUserMedia({
++        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
++      });
++    } catch (e) {
++      onError("Microphone not available");
++      mark(`could not open the microphone: ${e}`);
++      return;
++    }
++    ctx = new AudioContext();
++    const source = ctx.createMediaStreamSource(stream);
++    node = ctx.createScriptProcessor(FRAME, 1, 1);
++    const rate = ctx.sampleRate;
++    node.onaudioprocess = (ev) => onAudio(ev.inputBuffer.getChannelData(0), rate);
++    source.connect(node);
++    node.connect(ctx.destination);           // necessario perché il nodo giri; l'uscita è silenziosa
++    mark(`listening (local whisper, ${rate} Hz)`);
++  }
++
++  return {
++    start() {
++      listening = true;
++      paused = false;
++      void open();
++      if (ctx && ctx.state === "suspended") void ctx.resume();
++    },
++    stop() {
++      listening = false;
++      recording = false;
++      chunks = [];
++    },
++    pause() {
++      paused = true;
++      recording = false;
++      chunks = [];
++    },
++    resume() {
++      paused = false;
++      if (ctx && ctx.state === "suspended") void ctx.resume();
++    },
++    restart(reason: string) {
++      // Il segnale "DEAF" del monitor riguarda Chrome; qui non c'è nulla da
++      // riavviare, ma lo si annota se una trascrizione è ancora in corso.
++      if (inFlight) mark(`ignored restart (${reason}): transcription in progress`);
++    },
++  };
++}
+--- a/frontend/src/main.ts
++++ b/frontend/src/main.ts
+@@ -7,6 +7,12 @@
+ 
+ import { createOrb, type OrbState } from "./orb";
+ import { createVoiceInput, createAudioPlayer, createMicMonitor } from "./voice";
++import { createLocalVoiceInput } from "./localStt";
++
++declare const __JARVIS_STT__: string;
++// JARVIS_STT=local nel .env: Whisper sul PC invece del riconoscimento di Chrome.
++const makeVoiceInput = typeof __JARVIS_STT__ === "string" && __JARVIS_STT__ === "local"
++  ? createLocalVoiceInput : createVoiceInput;
+ import { createSocket } from "./ws";
+ import { openSettings, checkFirstTimeSetup } from "./settings";
+ import "./style.css";
+@@ -77,7 +83,7 @@
+ // Voice input
+ // ---------------------------------------------------------------------------
+ 
+-const voiceInput = createVoiceInput(
++const voiceInput = makeVoiceInput(
+   (text: string) => {
+     // The server decides whether this is echo, a barge-in, or a new turn.
+     micMonitor.sawSpeech();
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -21,6 +21,7 @@
+ export default defineConfig({
+   define: {
+     __JARVIS_LANG__: JSON.stringify(rootEnv.JARVIS_LANG || "en-US"),
++    __JARVIS_STT__: JSON.stringify(rootEnv.JARVIS_STT || "browser"),
+   },
+   server: {
+     port: 5173,
+--- a/preflight.py
++++ b/preflight.py
+@@ -270,6 +270,10 @@
+     check stays OK (matching prior behaviour) but says so honestly rather
+     than implying a guarantee it cannot make.
+     """
++    if claude_env.local_llm_url():
++        return Check(name="claude_login", status=STATUS_OK,
++                     message=f"Local model {claude_env.local_model()} via "
++                             f"{claude_env.local_llm_url()}; no Claude login needed.")
+     claude = shutil.which("claude")
+     if not claude:
+         return Check(
+@@ -441,6 +445,8 @@
+ 
+ def _check_fish_api_key_sync() -> Check:
+     """FISH_API_KEY must be set or JARVIS has no voice."""
++    if os.environ.get("JARVIS_TTS", "").lower() == "piper":
++        return Check(name="fish_api_key", status=STATUS_OK, message="Local Piper voice in use.")
+     if os.environ.get("FISH_API_KEY"):
+         return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+     return Check(
+--- a/run_executor.py
++++ b/run_executor.py
+@@ -263,6 +263,8 @@
+         so a --model flag is always emitted (brain.py sets this precedent
+         for the voice path already).
+         """
++        if claude_env.local_llm_url():
++            return claude_env.local_model()
+         return model or os.getenv("JARVIS_RUN_MODEL") or _DEFAULT_MODEL
+ 
+     async def start_existing(self, run_id: str, prompt: str,
+--- a/server.py
++++ b/server.py
+@@ -85,6 +85,7 @@
+ import jarvis_memory
+ import notifier
+ import tts
++import stt
+ from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
+ from speech import Priority, SpeechScheduler
+ 
+@@ -462,6 +463,9 @@
+ 
+ async def synthesize_speech(text: str) -> Optional[bytes]:
+     """Generate speech audio from text using Fish Audio TTS."""
++    if tts.piper_enabled():
++        r = await tts.synthesize_chunk(text, api_key="", voice_id="")
++        return r.audio if r else None
+     if not FISH_API_KEY:
+         log.warning("FISH_API_KEY not set, skipping TTS")
+         return None
+@@ -1789,6 +1793,16 @@
+     global cached_projects
+     cached_projects = []
+ 
++    if stt.enabled():
++        # Carica Whisper in sottofondo: la prima frase non deve aspettarlo.
++        async def _warm_stt():
++            try:
++                await asyncio.to_thread(stt.warm)
++            except Exception as e:
++                log.error(f"stt: could not load whisper: {e}")
++        _background.add(warm_task := asyncio.create_task(_warm_stt()))
++        warm_task.add_done_callback(_background.discard)
++
+     # FIRST, before anything reads JARVIS_PORT / JARVIS_BIND_HOST — the
+     # origin allowlist, the Host allowlist, and the URL the brain's MCP
+     # child dials all do. `main()` records those variables and this is a
+@@ -1858,6 +1872,28 @@
+     return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
+ 
+ 
++@app.post("/api/stt")
++async def api_stt(request: Request):
++    """Riconoscimento vocale locale (JARVIS_STT=local): WAV 16 kHz mono -> testo.
++
++    Il testo NON viene elaborato qui: il browser lo rimanda come un normale
++    `transcript` sul WebSocket, così eco, interruzioni e turni restano quelli
++    di sempre."""
++    if not stt.enabled():
++        return JSONResponse({"error": "local speech recognition is off"}, status_code=404)
++    body = await request.body()
++    if not body or len(body) > stt.MAX_WAV_BYTES:
++        return JSONResponse({"error": "bad audio size"}, status_code=413)
++    t0 = time.monotonic()
++    try:
++        text = await asyncio.to_thread(stt.transcribe, body)
++    except Exception as e:
++        log.error(f"stt failed: {e}", exc_info=True)
++        return JSONResponse({"error": "transcription failed"}, status_code=500)
++    log.info(f"stt: {len(body) // 32000:.0f}s audio -> {text!r} in {time.monotonic() - t0:.1f}s")
++    return {"text": text}
++
++
+ @app.post("/api/tts-test")
+ async def tts_test():
+     """Generate a test audio clip for debugging.
+--- a/stt.py
++++ b/stt.py
+@@ -0,0 +1,89 @@
++"""
++stt.py — riconoscimento vocale locale con faster-whisper.
++
++Attivo con JARVIS_STT=local. Il browser registra una frase (WAV mono 16 kHz,
++16 bit) e la manda a POST /api/stt; qui diventa testo, senza servizi esterni.
++
++Impostazioni (.env):
++  JARVIS_STT_MODEL   tiny | base | small | medium | large-v3   (predefinito: small)
++  JARVIS_STT_DEVICE  cpu | cuda                                 (predefinito: cpu)
++  JARVIS_LANG        es. it-IT -> lingua "it"; vuoto = rilevamento automatico
++"""
++from __future__ import annotations
++
++import io
++import logging
++import os
++import re
++import threading
++import wave
++
++log = logging.getLogger("jarvis.stt")
++
++MAX_WAV_BYTES = 4_000_000          # ~2 minuti a 16 kHz: ben oltre una frase
++
++_model = None
++_lock = threading.Lock()
++
++# Frasi che Whisper "allucina" su silenzio o rumore (sottotitoli dei dataset).
++_HALLUCINATIONS = re.compile(
++    r"amara\.org|sottotitoli|subtitles by|grazie per la visione|"
++    r"thanks? (for|you for) watching|iscriviti al canale|"
++    r"^\W*(grazie|thank you)\W*\Z",
++    re.IGNORECASE)
++
++
++def enabled() -> bool:
++    return os.getenv("JARVIS_STT", "").lower() == "local"
++
++
++def _language() -> str | None:
++    lang = os.getenv("JARVIS_LANG", "").strip()
++    return lang[:2].lower() if lang else None
++
++
++def _load():
++    global _model
++    if _model is None:
++        from faster_whisper import WhisperModel
++        name = os.getenv("JARVIS_STT_MODEL", "small")
++        device = os.getenv("JARVIS_STT_DEVICE", "cpu")
++        compute = "int8" if device == "cpu" else "float16"
++        _model = WhisperModel(name, device=device, compute_type=compute)
++        log.info(f"stt: loaded whisper {name} on {device} ({compute})")
++    return _model
++
++
++def warm() -> None:
++    """Carica il modello in anticipo, così la prima frase non aspetta."""
++    with _lock:
++        _load()
++
++
++def _samples(wav_bytes: bytes):
++    import numpy as np
++    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
++        if w.getnchannels() != 1 or w.getsampwidth() != 2 or w.getframerate() != 16000:
++            raise ValueError("expected 16 kHz mono 16-bit WAV")
++        raw = w.readframes(w.getnframes())
++    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
++
++
++def transcribe(wav_bytes: bytes) -> str:
++    """WAV -> testo. Bloccante: chiamare in un thread."""
++    audio = _samples(wav_bytes)
++    if audio.size < 16000 * 0.3:
++        return ""
++    with _lock:
++        model = _load()
++        segments, _info = model.transcribe(
++            audio, language=_language(), beam_size=1,
++            condition_on_previous_text=False, vad_filter=False)
++        kept = []
++        for s in segments:
++            if s.no_speech_prob > 0.6 or s.avg_logprob < -1.0:
++                continue
++            text = s.text.strip()
++            if text and not _HALLUCINATIONS.search(text):
++                kept.append(text)
++    return " ".join(kept).strip()
+--- a/tts.py
++++ b/tts.py
+@@ -6,9 +6,14 @@
+ """
+ from __future__ import annotations
+ 
++import asyncio
++import io
+ import logging
+ import os
++import threading
+ import time
++import wave
++from pathlib import Path
+ from dataclasses import dataclass
+ from typing import Optional
+ 
+@@ -26,10 +31,55 @@
+     total_sec: float
+ 
+ 
++# ── Piper: voce locale, nessun servizio esterno ─────────────────────────────
++# JARVIS_TTS=piper la attiva. JARVIS_PIPER_VOICE è il percorso del file .onnx
++# (accanto deve esserci il suo .onnx.json); predefinito data/voices/it_IT-paola-medium.onnx.
++_piper_voice = None
++_piper_lock = threading.Lock()
++
++
++def piper_enabled() -> bool:
++    return os.getenv("JARVIS_TTS", "").lower() == "piper"
++
++
++def _piper_path() -> Path:
++    raw = os.getenv("JARVIS_PIPER_VOICE", "").strip()
++    if raw:
++        return Path(raw).expanduser()
++    return Path(__file__).resolve().parent / "data" / "voices" / "it_IT-paola-medium.onnx"
++
++
++def piper_wav(text: str) -> bytes:
++    """Testo -> WAV (bytes). Bloccante: chiamare in un thread."""
++    global _piper_voice
++    with _piper_lock:
++        if _piper_voice is None:
++            from piper import PiperVoice
++            _piper_voice = PiperVoice.load(str(_piper_path()))
++            log.info(f"piper: loaded {_piper_path().name}")
++        buf = io.BytesIO()
++        with wave.open(buf, "wb") as wav:
++            _piper_voice.synthesize_wav(text, wav)
++        return buf.getvalue()
++
++
++async def _synthesize_piper(text: str) -> Optional[SynthResult]:
++    t0 = time.monotonic()
++    try:
++        audio = await asyncio.to_thread(piper_wav, text)
++    except Exception as e:
++        log.error(f"piper TTS error: {e}")
++        return None
++    took = time.monotonic() - t0
++    return SynthResult(audio, took, took) if audio else None
++
++
+ async def synthesize_chunk(text: str, *, api_key: str, voice_id: str,
+                            client: Optional[httpx.AsyncClient] = None,
+                            latency: str = "balanced", timeout: float = 15.0) -> Optional[SynthResult]:
+     text = (text or "").strip()
++    if text and piper_enabled():
++        return await _synthesize_piper(text)
+     if not text or not api_key:
+         return None
+     own = client is None

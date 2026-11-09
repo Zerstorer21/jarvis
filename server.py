@@ -85,6 +85,7 @@ import dialog
 import jarvis_memory
 import notifier
 import tts
+import stt
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
 from speech import Priority, SpeechScheduler
 
@@ -462,6 +463,9 @@ _last_greeting_time: float = 0
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
     """Generate speech audio from text using Fish Audio TTS."""
+    if tts.piper_enabled():
+        r = await tts.synthesize_chunk(text, api_key="", voice_id="")
+        return r.audio if r else None
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
@@ -1789,6 +1793,16 @@ async def lifespan(application: FastAPI):
     global cached_projects
     cached_projects = []
 
+    if stt.enabled():
+        # Carica Whisper in sottofondo: la prima frase non deve aspettarlo.
+        async def _warm_stt():
+            try:
+                await asyncio.to_thread(stt.warm)
+            except Exception as e:
+                log.error(f"stt: could not load whisper: {e}")
+        _background.add(warm_task := asyncio.create_task(_warm_stt()))
+        warm_task.add_done_callback(_background.discard)
+
     # FIRST, before anything reads JARVIS_PORT / JARVIS_BIND_HOST — the
     # origin allowlist, the Host allowlist, and the URL the brain's MCP
     # child dials all do. `main()` records those variables and this is a
@@ -1856,6 +1870,28 @@ app.add_middleware(web_auth.OriginGuard)
 @app.get("/api/health")
 async def health():
     return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
+
+
+@app.post("/api/stt")
+async def api_stt(request: Request):
+    """Riconoscimento vocale locale (JARVIS_STT=local): WAV 16 kHz mono -> testo.
+
+    Il testo NON viene elaborato qui: il browser lo rimanda come un normale
+    `transcript` sul WebSocket, così eco, interruzioni e turni restano quelli
+    di sempre."""
+    if not stt.enabled():
+        return JSONResponse({"error": "local speech recognition is off"}, status_code=404)
+    body = await request.body()
+    if not body or len(body) > stt.MAX_WAV_BYTES:
+        return JSONResponse({"error": "bad audio size"}, status_code=413)
+    t0 = time.monotonic()
+    try:
+        text = await asyncio.to_thread(stt.transcribe, body)
+    except Exception as e:
+        log.error(f"stt failed: {e}", exc_info=True)
+        return JSONResponse({"error": "transcription failed"}, status_code=500)
+    log.info(f"stt: {len(body) // 32000:.0f}s audio -> {text!r} in {time.monotonic() - t0:.1f}s")
+    return {"text": text}
 
 
 @app.post("/api/tts-test")

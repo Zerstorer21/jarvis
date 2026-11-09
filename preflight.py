@@ -270,6 +270,10 @@ async def _check_claude_login(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     check stays OK (matching prior behaviour) but says so honestly rather
     than implying a guarantee it cannot make.
     """
+    if claude_env.local_llm_url():
+        return Check(name="claude_login", status=STATUS_OK,
+                     message=f"Local model {claude_env.local_model()} via "
+                             f"{claude_env.local_llm_url()}; no Claude login needed.")
     claude = shutil.which("claude")
     if not claude:
         return Check(
@@ -441,6 +445,8 @@ def _check_screen_recording_sync() -> Check:
 
 def _check_fish_api_key_sync() -> Check:
     """FISH_API_KEY must be set or JARVIS has no voice."""
+    if os.environ.get("JARVIS_TTS", "").lower() == "piper":
+        return Check(name="fish_api_key", status=STATUS_OK, message="Local Piper voice in use.")
     if os.environ.get("FISH_API_KEY"):
         return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
     return Check(

@@ -48,11 +48,48 @@ SCRUBBED_ENV_KEYS = {"CLAUDECODE"}
 STREAM_LINE_LIMIT = 64 * 1024 * 1024  # 64 MiB per line
 
 
+def local_llm_url(source: dict[str, str] | None = None) -> str:
+    """JARVIS_LOCAL_LLM_URL: se impostato (es. http://localhost:11434), ogni
+    figlio Claude Code parla con quel server compatibile Anthropic (Ollama)
+    invece che con Anthropic. Vuoto = comportamento originale."""
+    src = os.environ if source is None else source
+    return (src.get("JARVIS_LOCAL_LLM_URL") or "").strip()
+
+
+def local_model(source: dict[str, str] | None = None) -> str:
+    src = os.environ if source is None else source
+    return (src.get("JARVIS_LOCAL_MODEL") or "qwen3.5:9b").strip()
+
+
 def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """A copy of the environment with everything that would redirect or
     re-bill a Claude Code child removed. Everything else — PATH, HOME,
-    CLAUDE_CONFIG_DIR, the user's own variables — passes through untouched."""
+    CLAUDE_CONFIG_DIR, the user's own variables — passes through untouched.
+
+    In modalità locale lo scrub resta, poi si aggiunge SOLO il reindirizzamento
+    verso il server locale scelto dall'utente nel .env."""
     source = os.environ if base is None else base
-    return {k: v for k, v in source.items()
-            if not k.startswith(SCRUBBED_ENV_PREFIXES)
-            and k not in SCRUBBED_ENV_KEYS}
+    env = {k: v for k, v in source.items()
+           if not k.startswith(SCRUBBED_ENV_PREFIXES)
+           and k not in SCRUBBED_ENV_KEYS}
+    url = local_llm_url(source)
+    if url:
+        model = local_model(source)
+        env.update({
+            "ANTHROPIC_BASE_URL": url,
+            "ANTHROPIC_AUTH_TOKEN": "ollama",
+            "ANTHROPIC_API_KEY": "",
+            # Ogni alias (anche quelli usati dai lavori in background di
+            # Claude Code) punta al modello locale.
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            # Niente telemetria, segnalazioni d'errore o aggiornamenti verso l'esterno.
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+        })
+    return env

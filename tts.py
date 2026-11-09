@@ -6,9 +6,14 @@ returned whole because the browser decodes one complete MP3 per chunk.
 """
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import os
+import threading
 import time
+import wave
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -26,10 +31,55 @@ class SynthResult:
     total_sec: float
 
 
+# ── Piper: voce locale, nessun servizio esterno ─────────────────────────────
+# JARVIS_TTS=piper la attiva. JARVIS_PIPER_VOICE è il percorso del file .onnx
+# (accanto deve esserci il suo .onnx.json); predefinito data/voices/it_IT-paola-medium.onnx.
+_piper_voice = None
+_piper_lock = threading.Lock()
+
+
+def piper_enabled() -> bool:
+    return os.getenv("JARVIS_TTS", "").lower() == "piper"
+
+
+def _piper_path() -> Path:
+    raw = os.getenv("JARVIS_PIPER_VOICE", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parent / "data" / "voices" / "it_IT-paola-medium.onnx"
+
+
+def piper_wav(text: str) -> bytes:
+    """Testo -> WAV (bytes). Bloccante: chiamare in un thread."""
+    global _piper_voice
+    with _piper_lock:
+        if _piper_voice is None:
+            from piper import PiperVoice
+            _piper_voice = PiperVoice.load(str(_piper_path()))
+            log.info(f"piper: loaded {_piper_path().name}")
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wav:
+            _piper_voice.synthesize_wav(text, wav)
+        return buf.getvalue()
+
+
+async def _synthesize_piper(text: str) -> Optional[SynthResult]:
+    t0 = time.monotonic()
+    try:
+        audio = await asyncio.to_thread(piper_wav, text)
+    except Exception as e:
+        log.error(f"piper TTS error: {e}")
+        return None
+    took = time.monotonic() - t0
+    return SynthResult(audio, took, took) if audio else None
+
+
 async def synthesize_chunk(text: str, *, api_key: str, voice_id: str,
                            client: Optional[httpx.AsyncClient] = None,
                            latency: str = "balanced", timeout: float = 15.0) -> Optional[SynthResult]:
     text = (text or "").strip()
+    if text and piper_enabled():
+        return await _synthesize_piper(text)
     if not text or not api_key:
         return None
     own = client is None

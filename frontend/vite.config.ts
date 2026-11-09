@@ -21,6 +21,7 @@ const rootEnv = loadEnv("development", resolve(__dirname, ".."), "JARVIS_");
 export default defineConfig({
   define: {
     __JARVIS_LANG__: JSON.stringify(rootEnv.JARVIS_LANG || "en-US"),
+    __JARVIS_STT__: JSON.stringify(rootEnv.JARVIS_STT || "browser"),
   },
   server: {
     port: 5173,

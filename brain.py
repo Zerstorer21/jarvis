@@ -307,13 +307,18 @@ class BrainConfig:
 
     @classmethod
     def from_env(cls, home: Path) -> "BrainConfig":
+        local = bool(claude_env.local_llm_url())
         return cls(
             home=home,
-            model=os.getenv("JARVIS_BRAIN_MODEL", "sonnet"),
+            model=(claude_env.local_model() if local
+                   else os.getenv("JARVIS_BRAIN_MODEL", "sonnet")),
             effort=os.getenv("JARVIS_BRAIN_EFFORT", "low"),
             claude_path=os.getenv("JARVIS_CLAUDE_PATH") or None,
-            turn_timeout=float(os.getenv("JARVIS_BRAIN_TURN_TIMEOUT", "90")),
-            context_budget=int(os.getenv("JARVIS_BRAIN_CONTEXT_BUDGET", "120000")),
+            # Un modello locale è più lento e ha un contesto più piccolo.
+            turn_timeout=float(os.getenv("JARVIS_BRAIN_TURN_TIMEOUT",
+                                         "300" if local else "90")),
+            context_budget=int(os.getenv("JARVIS_BRAIN_CONTEXT_BUDGET",
+                                         "45000" if local else "120000")),
             user_name=os.getenv("USER_NAME", ""),
         )
 

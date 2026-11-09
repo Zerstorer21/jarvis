@@ -263,6 +263,8 @@ class RunExecutor:
         so a --model flag is always emitted (brain.py sets this precedent
         for the voice path already).
         """
+        if claude_env.local_llm_url():
+            return claude_env.local_model()
         return model or os.getenv("JARVIS_RUN_MODEL") or _DEFAULT_MODEL
 
     async def start_existing(self, run_id: str, prompt: str,

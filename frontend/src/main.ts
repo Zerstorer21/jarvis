@@ -7,6 +7,12 @@
 
 import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer, createMicMonitor } from "./voice";
+import { createLocalVoiceInput } from "./localStt";
+
+declare const __JARVIS_STT__: string;
+// JARVIS_STT=local nel .env: Whisper sul PC invece del riconoscimento di Chrome.
+const makeVoiceInput = typeof __JARVIS_STT__ === "string" && __JARVIS_STT__ === "local"
+  ? createLocalVoiceInput : createVoiceInput;
 import { createSocket } from "./ws";
 import { openSettings, checkFirstTimeSetup } from "./settings";
 import "./style.css";
@@ -77,7 +83,7 @@ function transition(newState: State) {
 // Voice input
 // ---------------------------------------------------------------------------
 
-const voiceInput = createVoiceInput(
+const voiceInput = makeVoiceInput(
   (text: string) => {
     // The server decides whether this is echo, a barge-in, or a new turn.
     micMonitor.sawSpeech();
