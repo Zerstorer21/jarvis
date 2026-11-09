@@ -38,6 +38,7 @@ export function createLocalVoiceInput(
   let chunks: Float32Array[] = [];
   const preroll: Float32Array[] = [];
   let inFlight = 0;
+  let frames = 0;
 
   const mark = (what: string) => {
     console.info(`[voice-local] ${new Date().toLocaleTimeString()} ${what}`);
@@ -111,6 +112,7 @@ export function createLocalVoiceInput(
   }
 
   function onAudio(buf: Float32Array, rate: number) {
+    frames++;
     if (!listening || paused) return;
     const copy = new Float32Array(buf);
     const level = rms(copy);
@@ -129,6 +131,7 @@ export function createLocalVoiceInput(
           lastLoudAt = now;
           chunks = preroll.splice(0);
           loudRun = 0;
+          mark(`speech start (level ${level.toFixed(3)}, threshold ${threshold.toFixed(3)})`);
         }
       } else {
         loudRun = 0;
@@ -160,7 +163,30 @@ export function createLocalVoiceInput(
     node.onaudioprocess = (ev) => onAudio(ev.inputBuffer.getChannelData(0), rate);
     source.connect(node);
     node.connect(ctx.destination);           // necessario perché il nodo giri; l'uscita è silenziosa
-    mark(`listening (local whisper, ${rate} Hz)`);
+    mark(`listening (local whisper, ${rate} Hz, audio ${ctx.state})`);
+
+    // Chrome crea l'AudioContext "suspended" finché l'utente non interagisce
+    // con la pagina: senza questo il microfono non produce nemmeno un campione.
+    const wake = () => {
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume().then(() => mark("audio context resumed"));
+      }
+    };
+    document.addEventListener("click", wake);
+    document.addEventListener("keydown", wake);
+    document.addEventListener("touchstart", wake);
+    wake();
+
+    // Diagnostica: se l'audio non scorre, dirlo nel log invece di tacere.
+    let lastFrames = -1;
+    setInterval(() => {
+      if (!ctx || !listening) return;
+      if (frames === lastFrames) {
+        mark(`no audio frames (audio context ${ctx.state}) — click the page`);
+        wake();
+      }
+      lastFrames = frames;
+    }, 10000);
   }
 
   return {
