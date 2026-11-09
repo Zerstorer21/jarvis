@@ -632,7 +632,8 @@ def _fmt_reset(ts) -> str:
         when = datetime.fromtimestamp(float(ts))
     except (TypeError, ValueError, OSError, OverflowError):
         return "later"
-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+    nopad = "#" if sys.platform == "win32" else "-"   # %-I esiste solo su glibc/macOS
+    clock = when.strftime(f"%{nopad}I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
     days = (when.date() - datetime.now().date()).days
     if days <= 0:
         return clock
@@ -640,7 +641,7 @@ def _fmt_reset(ts) -> str:
         return f"tomorrow at {clock}"
     if days < 7:
         return f"{when.strftime('%A')} at {clock}"
-    return f"{when.strftime('%A %-d %B')} at {clock}"
+    return f"{when.strftime(f'%A %{nopad}d %B')} at {clock}"
 
 
 # True but useless: "down" names neither cause nor remedy. When the brain's

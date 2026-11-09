@@ -1,0 +1,51 @@
+--- a/usage_scan.py
++++ b/usage_scan.py
+@@ -65,9 +65,10 @@
+ import json
+ import logging
+ import os
++import sys
+ import time
+ from dataclasses import dataclass, field
+-from datetime import datetime
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
+ import session_watch
+@@ -158,8 +159,13 @@
+ # `fromisoformat` accepts that string happily, so catching only its ValueError
+ # left the second call unguarded. Two years of slack at each end covers every
+ # UTC offset without needing to know the local one.
+-_DAY_MIN = datetime(2, 1, 1).timestamp()
+-_DAY_MAX = datetime(9997, 1, 1).timestamp()
++if sys.platform == "win32":
++    # Windows: mktime/localtime coprono solo 1970-3000, oltre danno OSError 22.
++    _DAY_MIN = datetime(1970, 1, 3, tzinfo=timezone.utc).timestamp()
++    _DAY_MAX = datetime(2999, 1, 1, tzinfo=timezone.utc).timestamp()
++else:
++    _DAY_MIN = datetime(2, 1, 1).timestamp()
++    _DAY_MAX = datetime(9997, 1, 1).timestamp()
+ 
+ 
+ def _epoch(stamp) -> float | None:
+--- a/server.py
++++ b/server.py
+@@ -632,7 +632,8 @@
+         when = datetime.fromtimestamp(float(ts))
+     except (TypeError, ValueError, OSError, OverflowError):
+         return "later"
+-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
++    nopad = "#" if sys.platform == "win32" else "-"   # %-I esiste solo su glibc/macOS
++    clock = when.strftime(f"%{nopad}I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+     days = (when.date() - datetime.now().date()).days
+     if days <= 0:
+         return clock
+@@ -640,7 +641,7 @@
+         return f"tomorrow at {clock}"
+     if days < 7:
+         return f"{when.strftime('%A')} at {clock}"
+-    return f"{when.strftime('%A %-d %B')} at {clock}"
++    return f"{when.strftime(f'%A %{nopad}d %B')} at {clock}"
+ 
+ 
+ # True but useless: "down" names neither cause nor remedy. When the brain's
