@@ -1,0 +1,31 @@
+--- a/tts.py
++++ b/tts.py
+@@ -7,6 +7,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import os
+ import time
+ from dataclasses import dataclass
+ from typing import Optional
+@@ -39,7 +40,9 @@
+     try:
+         async with client.stream(
+             "POST", FISH_TTS_URL,
+-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
++            # Senza header `model` Fish usa s2.1-pro, a pagamento.
++            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
++                     "model": os.getenv("FISH_MODEL", "s2.1-pro-free")},
+             json={"text": text, "reference_id": voice_id, "format": "mp3", "mp3_bitrate": 128, "latency": latency},
+             timeout=timeout,
+         ) as resp:
+--- a/server.py
++++ b/server.py
+@@ -473,6 +473,7 @@
+                 headers={
+                     "Authorization": f"Bearer {FISH_API_KEY}",
+                     "Content-Type": "application/json",
++                    "model": os.getenv("FISH_MODEL", "s2.1-pro-free"),
+                 },
+                 json={
+                     "text": text,

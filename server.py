@@ -473,6 +473,7 @@ async def synthesize_speech(text: str) -> Optional[bytes]:
                 headers={
                     "Authorization": f"Bearer {FISH_API_KEY}",
                     "Content-Type": "application/json",
+                    "model": os.getenv("FISH_MODEL", "s2.1-pro-free"),
                 },
                 json={
                     "text": text,
