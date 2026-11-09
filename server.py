@@ -721,6 +721,10 @@ async def _on_brain_state(state: str, info: dict) -> None:
 
 def _greeting() -> str:
     hour = datetime.now().hour
+    if os.getenv("JARVIS_LANG", "").lower().startswith("it"):
+        who = "signore" if USER_NAME in ("", "sir") else USER_NAME
+        part = "Buongiorno" if hour < 12 else ("Buon pomeriggio" if hour < 17 else "Buonasera")
+        return f"{part}, {who}."
     if hour < 12:
         return "Good morning, sir."
     if hour < 17:

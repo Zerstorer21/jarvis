@@ -1,3 +1,4 @@
+declare const __JARVIS_LANG__: string;
 /**
  * Voice input (Web Speech API) and audio output (AudioContext) for JARVIS.
  *
@@ -229,7 +230,7 @@ export function createVoiceInput(
     const sr = new SR();
     sr.continuous = true;
     sr.interimResults = true;
-    sr.lang = "en-US";
+    sr.lang = typeof __JARVIS_LANG__ === "string" ? __JARVIS_LANG__ : "en-US";
     const e: Engine = { sr, running: false, audio: false, startedAt: 0, stoppedAt: 0, retired: false };
 
     sr.onstart = () => {

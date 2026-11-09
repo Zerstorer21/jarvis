@@ -131,7 +131,8 @@ class Priority(IntEnum):
 
 
 BRIDGES = ("As I was saying —", "Back to it —", "Where was I —")
-CANCEL_WORDS = ("wait", "no", "stop", "cancel", "hold on")
+CANCEL_WORDS = ("wait", "no", "stop", "cancel", "hold on",
+                "aspetta", "fermati", "annulla", "basta")
 UNREAD_PREFIX = "Before I forget —"
 # The last resort, and only that. An unacked chunk's tokens count as echo
 # because the chunk may still be coming out of the speaker — and nothing plays
@@ -246,7 +247,8 @@ def _tokens(text: str) -> list[str]:
 # related — "what did you mean by that", "what do you mean", "can you
 # explain that again", "say more about that". Those go to the brain like any
 # other turn.
-_REPLAY_FILLER = frozenset({"sorry", "jarvis", "please", "um", "uh", "i'm"})
+_REPLAY_FILLER = frozenset({"sorry", "jarvis", "please", "um", "uh", "i'm",
+                            "scusa", "scusami"})
 _REPLAY_TRIGGERS = frozenset({
     ("say", "that", "again"),
     ("say", "it", "again"),
@@ -259,6 +261,12 @@ _REPLAY_TRIGGERS = frozenset({
     ("one", "more", "time"),
     ("pardon",),
     ("pardon", "me"),
+    ("ripeti",),
+    ("puoi", "ripetere"),
+    ("ripeti", "per", "favore"),
+    ("come", "hai", "detto"),
+    ("cosa", "hai", "detto"),
+    ("non", "ho", "capito"),
 })
 
 

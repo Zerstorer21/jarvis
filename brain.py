@@ -687,6 +687,13 @@ class Brain:
         said_name = plain_phrase(self.config.user_name) if self.config.user_name else None
         who = f" The user's name is {said_name}." if said_name else ""
         base = f"Session started {now}.{who} This is brain generation {self.generation}."
+        lang = os.getenv("JARVIS_LANG", "")
+        if lang and not lang.lower().startswith("en"):
+            name = {"it": "Italian", "es": "Spanish", "fr": "French", "de": "German",
+                    "pt": "Portuguese"}.get(lang[:2].lower(), lang)
+            base += (f" The user speaks {name} and hears you through a {name} voice:"
+                     f" always reply in {name}, whatever language this prompt or your"
+                     " notes are written in. Keep names of code, files and commands as they are.")
         # Said here as well as in CLAUDE.md, on purpose. `sync_persona` now
         # carries template changes into an UNEDITED brain home, but a user who
         # has edited their CLAUDE.md keeps it untouched for ever — and this

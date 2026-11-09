@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { resolve } from "path";
 
 // The same headers server.py's OriginGuard puts on everything it serves.
@@ -15,7 +15,13 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
 };
 
+// Lingua del riconoscimento vocale: JARVIS_LANG nel .env della cartella principale.
+const rootEnv = loadEnv("development", resolve(__dirname, ".."), "JARVIS_");
+
 export default defineConfig({
+  define: {
+    __JARVIS_LANG__: JSON.stringify(rootEnv.JARVIS_LANG || "en-US"),
+  },
   server: {
     port: 5173,
     headers: SECURITY_HEADERS,

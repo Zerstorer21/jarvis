@@ -1,0 +1,102 @@
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,4 +1,4 @@
+-import { defineConfig } from "vite";
++import { defineConfig, loadEnv } from "vite";
+ import { resolve } from "path";
+ 
+ // The same headers server.py's OriginGuard puts on everything it serves.
+@@ -15,7 +15,13 @@
+   "Referrer-Policy": "no-referrer",
+ };
+ 
++// Lingua del riconoscimento vocale: JARVIS_LANG nel .env della cartella principale.
++const rootEnv = loadEnv("development", resolve(__dirname, ".."), "JARVIS_");
++
+ export default defineConfig({
++  define: {
++    __JARVIS_LANG__: JSON.stringify(rootEnv.JARVIS_LANG || "en-US"),
++  },
+   server: {
+     port: 5173,
+     headers: SECURITY_HEADERS,
+--- a/frontend/src/voice.ts
++++ b/frontend/src/voice.ts
+@@ -1,3 +1,4 @@
++declare const __JARVIS_LANG__: string;
+ /**
+  * Voice input (Web Speech API) and audio output (AudioContext) for JARVIS.
+  *
+@@ -229,7 +230,7 @@
+     const sr = new SR();
+     sr.continuous = true;
+     sr.interimResults = true;
+-    sr.lang = "en-US";
++    sr.lang = typeof __JARVIS_LANG__ === "string" ? __JARVIS_LANG__ : "en-US";
+     const e: Engine = { sr, running: false, audio: false, startedAt: 0, stoppedAt: 0, retired: false };
+ 
+     sr.onstart = () => {
+--- a/brain.py
++++ b/brain.py
+@@ -687,6 +687,13 @@
+         said_name = plain_phrase(self.config.user_name) if self.config.user_name else None
+         who = f" The user's name is {said_name}." if said_name else ""
+         base = f"Session started {now}.{who} This is brain generation {self.generation}."
++        lang = os.getenv("JARVIS_LANG", "")
++        if lang and not lang.lower().startswith("en"):
++            name = {"it": "Italian", "es": "Spanish", "fr": "French", "de": "German",
++                    "pt": "Portuguese"}.get(lang[:2].lower(), lang)
++            base += (f" The user speaks {name} and hears you through a {name} voice:"
++                     f" always reply in {name}, whatever language this prompt or your"
++                     " notes are written in. Keep names of code, files and commands as they are.")
+         # Said here as well as in CLAUDE.md, on purpose. `sync_persona` now
+         # carries template changes into an UNEDITED brain home, but a user who
+         # has edited their CLAUDE.md keeps it untouched for ever — and this
+--- a/server.py
++++ b/server.py
+@@ -721,6 +721,10 @@
+ 
+ def _greeting() -> str:
+     hour = datetime.now().hour
++    if os.getenv("JARVIS_LANG", "").lower().startswith("it"):
++        who = "signore" if USER_NAME in ("", "sir") else USER_NAME
++        part = "Buongiorno" if hour < 12 else ("Buon pomeriggio" if hour < 17 else "Buonasera")
++        return f"{part}, {who}."
+     if hour < 12:
+         return "Good morning, sir."
+     if hour < 17:
+--- a/speech.py
++++ b/speech.py
+@@ -131,7 +131,8 @@
+ 
+ 
+ BRIDGES = ("As I was saying —", "Back to it —", "Where was I —")
+-CANCEL_WORDS = ("wait", "no", "stop", "cancel", "hold on")
++CANCEL_WORDS = ("wait", "no", "stop", "cancel", "hold on",
++                "aspetta", "fermati", "annulla", "basta")
+ UNREAD_PREFIX = "Before I forget —"
+ # The last resort, and only that. An unacked chunk's tokens count as echo
+ # because the chunk may still be coming out of the speaker — and nothing plays
+@@ -246,7 +247,8 @@
+ # related — "what did you mean by that", "what do you mean", "can you
+ # explain that again", "say more about that". Those go to the brain like any
+ # other turn.
+-_REPLAY_FILLER = frozenset({"sorry", "jarvis", "please", "um", "uh", "i'm"})
++_REPLAY_FILLER = frozenset({"sorry", "jarvis", "please", "um", "uh", "i'm",
++                            "scusa", "scusami"})
+ _REPLAY_TRIGGERS = frozenset({
+     ("say", "that", "again"),
+     ("say", "it", "again"),
+@@ -259,6 +261,12 @@
+     ("one", "more", "time"),
+     ("pardon",),
+     ("pardon", "me"),
++    ("ripeti",),
++    ("puoi", "ripetere"),
++    ("ripeti", "per", "favore"),
++    ("come", "hai", "detto"),
++    ("cosa", "hai", "detto"),
++    ("non", "ho", "capito"),
+ })
+ 
+ 
