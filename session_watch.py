@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,10 @@ def pid_alive(pid) -> bool:
         pid = int(pid)
         if pid <= 0:
             return False
+        if sys.platform == "win32":
+            # os.kill(pid, 0) su Windows invia CTRL_C_EVENT: ucciderebbe il processo.
+            import psutil
+            return psutil.pid_exists(pid)
         os.kill(pid, 0)
     except (OSError, TypeError, ValueError):
         return False

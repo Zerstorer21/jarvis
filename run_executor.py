@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import shlex
+import sys
 import shutil
 import time
 from typing import Callable
@@ -441,7 +442,9 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        # shlex in modalità POSIX toglie i backslash dai percorsi Windows.
+        base = ([self._claude_path] if sys.platform == "win32"
+                else shlex.split(self._claude_path))
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:

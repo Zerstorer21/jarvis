@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -742,7 +743,9 @@ class Brain:
 
     def command(self) -> list[str]:
         c = self.config
-        cmd = shlex.split(self._claude) + [
+        # shlex in modalità POSIX toglie i backslash dai percorsi Windows.
+        base = [self._claude] if sys.platform == "win32" else shlex.split(self._claude)
+        cmd = base + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages",
             "--model", c.model, "--effort", c.effort, "--name", "jarvis",

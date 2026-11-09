@@ -33,6 +33,8 @@ def post_to_session(socket_path: str | None, prompt: str,
         return REFUSED
     if not socket_path or not Path(socket_path).exists():
         return NOT_LIVE
+    if not hasattr(socket, "AF_UNIX"):
+        return NOT_LIVE           # Python su Windows non espone AF_UNIX
 
     lines = []
     # What is actually known about this token, recorded so nobody "fixes" it

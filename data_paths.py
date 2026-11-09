@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -373,6 +374,19 @@ def ensure_tool_token() -> str:
     import stat as _stat
     path = tool_token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        # Windows: niente uid/O_NOFOLLOW/fchmod. La cartella sta sotto
+        # %USERPROFILE%, le cui ACL ereditate la rendono già privata.
+        if path.is_symlink():
+            raise OSError(f"{path} is a symlink, refusing it")
+        if path.exists():
+            existing = path.read_text("utf-8", "ignore").strip()
+            if existing:
+                return existing
+        token = secrets.token_urlsafe(32)
+        path.write_text(token, "utf-8")
+        return token
 
     token = secrets.token_urlsafe(32)
     try:

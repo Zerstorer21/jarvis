@@ -286,6 +286,8 @@ async def capture_screen(display: int | None = None) -> Shot:
 
     Call this ONLY on a turn the user drove. See the module docstring.
     """
+    if sys.platform == "win32":
+        return await _capture_windows(display)
     if screen_recording_granted() is False:
         raise ScreenError(_NO_PERMISSION)
 
@@ -386,6 +388,8 @@ async def list_windows() -> list[Window]:
     Raises ScreenError when Accessibility is missing. An empty list would have
     JARVIS say "nothing is open" — a lie with a remedy attached.
     """
+    if sys.platform == "win32":
+        return await asyncio.to_thread(_list_windows_win)
     rc, stdout, stderr = await _run("osascript", "-e", _WINDOWS_SCRIPT,
                                     timeout=WINDOWS_TIMEOUT_SEC)
     if rc != 0:
@@ -407,3 +411,71 @@ async def list_windows() -> list[Window]:
         if len(windows) >= MAX_WINDOWS:
             break
     return windows
+
+
+# ── Windows ───────────────────────────────────────────────────────────────
+
+async def _capture_windows(display: int | None) -> Shot:
+    """Come capture_screen, con mss + Pillow al posto di screencapture + sips."""
+    import io
+
+    def grab() -> Shot:
+        import mss
+        from PIL import Image
+        with mss.mss() as sct:
+            monitors = sct.monitors          # [0] = tutti insieme, [1..] = singoli
+            idx = display or 1
+            if idx >= len(monitors):
+                raise ScreenError("I can't find that display, sir")
+            raw = sct.grab(monitors[idx])
+        img = Image.frombytes("RGB", raw.size, raw.rgb)
+        img.thumbnail((SHOT_MAX_EDGE, SHOT_MAX_EDGE))
+        sample = img.resize((BLANK_SAMPLE_EDGE, BLANK_SAMPLE_EDGE)).convert("RGB")
+        if _is_blank(list(sample.getdata())):
+            raise ScreenError("your screen came back blank, sir")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        png = buf.getvalue()
+        if len(png) > MAX_SHOT_BYTES:
+            raise ScreenError("that picture came out far too large to send, sir")
+        return Shot(png=png, width=img.width, height=img.height)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(grab), CAPTURE_TIMEOUT_SEC)
+    except ScreenError:
+        raise
+    except Exception as e:
+        log.warning(f"windows capture failed: {e}")
+        raise ScreenError("I couldn't get a picture of your screen, sir")
+
+
+def _list_windows_win() -> list[Window]:
+    """Finestre visibili con titolo, via EnumWindows (ctypes) + psutil."""
+    import ctypes.wintypes as wt
+    import psutil
+
+    user32 = ctypes.windll.user32
+    front = user32.GetForegroundWindow()
+    found: list[Window] = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def _each(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        try:
+            app = psutil.Process(pid.value).name().removesuffix(".exe")
+        except psutil.Error:
+            app = "?"
+        found.append(Window(app=app, title=buf.value, frontmost=(hwnd == front)))
+        return True
+
+    user32.EnumWindows(_each, 0)
+    found.sort(key=lambda w: not w.frontmost)
+    return found[:MAX_WINDOWS]

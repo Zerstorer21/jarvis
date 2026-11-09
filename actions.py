@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+from pathlib import Path
 
 log = logging.getLogger("jarvis.actions")
 
@@ -82,6 +84,22 @@ def applescript_escape(s: str) -> str:
 
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
+    if sys.platform == "win32":
+        import subprocess
+        # Windows PowerShell 5.1 non conosce `&&`; PowerShell 7 (pwsh) sì.
+        shell = shutil.which("pwsh") or "powershell.exe"
+        if command and shell == "powershell.exe":
+            command = command.replace(" && ", "; ")
+        argv = [shell, "-NoExit"] + (["-Command", command] if command else [])
+        try:
+            subprocess.Popen(argv, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            ok = True
+        except OSError as e:
+            log.error(f"open_terminal failed: {e}")
+            ok = False
+        return {"success": ok,
+                "confirmation": "Terminal is open, sir." if ok
+                else "I had trouble opening Terminal, sir."}
     if command:
         escaped = applescript_escape(command)
         script = (
@@ -125,6 +143,8 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
     README, so this is a straight line from attacker text to a shell.
     `tests/test_applescript_url_injection.py` runs the payload.
     """
+    if sys.platform == "win32":
+        return await asyncio.to_thread(_open_browser_windows, url, browser)
     escaped_url = applescript_escape(url)
 
     if browser.lower() == "firefox":
@@ -157,6 +177,41 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
         "success": success,
         "confirmation": f"Pulled that up in {app_name}, sir." if success else f"{app_name} ran into a problem, sir.",
     }
+
+
+_SAFE_FILE_EXT = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
+                  ".svg", ".webp", ".txt", ".md"}
+
+
+def _open_browser_windows(url: str, browser: str) -> dict:
+    """Windows: solo http(s) o file:// di tipi innocui, mai via shell."""
+    import subprocess
+    import webbrowser
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+
+    u = urlparse(url)
+    allowed = u.scheme in ("http", "https") or (
+        u.scheme == "file"
+        and Path(url2pathname(unquote(u.path))).suffix.lower() in _SAFE_FILE_EXT)
+    if not allowed:
+        log.error(f"open_browser refused {url!r}")
+        return {"success": False, "confirmation": "I won't open that, sir."}
+
+    candidates = {
+        "chrome": [r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+                   r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+                   r"%LocalAppData%\Google\Chrome\Application\chrome.exe"],
+        "firefox": [r"%ProgramFiles%\Mozilla Firefox\firefox.exe"],
+    }.get((browser or "chrome").lower(), [])
+    for candidate in candidates:
+        exe = os.path.expandvars(candidate)
+        if os.path.isfile(exe):
+            subprocess.Popen([exe, url])
+            return {"success": True, "confirmation": "Pulled that up, sir."}
+    ok = webbrowser.open(url)
+    return {"success": ok, "confirmation": "Pulled that up, sir." if ok
+            else "The browser ran into a problem, sir."}
 
 
 # Keep backward compat
@@ -208,6 +263,11 @@ VSCODE_APP = "/Applications/Visual Studio Code.app"
 
 def _vscode_command(path: str) -> list[str] | None:
     """The argv that opens `path` in VS Code, or None if it is not installed."""
+    if sys.platform == "win32":
+        # Code.exe diretto: `code` su Windows è un .cmd, e passare percorsi
+        # a un batch file espone a injection sugli argomenti.
+        exe = os.path.expandvars(r"%LocalAppData%\Programs\Microsoft VS Code\Code.exe")
+        return [exe, str(path)] if os.path.isfile(exe) else None
     binary = shutil.which("code")
     if binary:
         return [binary, str(path)]
@@ -221,8 +281,13 @@ async def open_in_editor(path: str) -> dict:
     argv = _vscode_command(path)
     editor = "VS Code"
     if argv is None:
-        argv = ["open", str(path)]
-        editor = "your editor"
+        if sys.platform == "win32":
+            # Mostra il file in Esplora risorse senza eseguirlo.
+            argv = ["explorer.exe", f"/select,{path}"]
+            editor = "Explorer"
+        else:
+            argv = ["open", str(path)]
+            editor = "your editor"
 
     try:
         proc = await asyncio.create_subprocess_exec(

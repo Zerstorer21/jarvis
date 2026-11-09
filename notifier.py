@@ -69,6 +69,12 @@ def available() -> bool:
     Center settings, Focus/Do Not Disturb, or per-app permissions can still
     silently drop the notification even when this returns True.
     """
+    if sys.platform == "win32":
+        try:
+            import winotify  # noqa: F401
+            return True
+        except ImportError:
+            return False
     return sys.platform == "darwin" and shutil.which("osascript") is not None
 
 
@@ -90,6 +96,14 @@ async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
         safe_title = _truncate(str(title or ""), _TITLE_MAX)
         safe_message = _truncate(str(message or ""), _MESSAGE_MAX)
         safe_subtitle = _truncate(str(subtitle or ""), _SUBTITLE_MAX)
+
+        if sys.platform == "win32":
+            from winotify import Notification
+            body = f"{safe_subtitle}\n{safe_message}" if safe_subtitle else safe_message
+            toast = Notification(app_id="JARVIS", title=safe_title, msg=body)
+            await asyncio.wait_for(asyncio.to_thread(toast.show),
+                                   timeout=_TIMEOUT_SECONDS)
+            return True
 
         try:
             proc = await asyncio.create_subprocess_exec(

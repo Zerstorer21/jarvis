@@ -37,6 +37,7 @@ import asyncio
 import logging
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 
 log = logging.getLogger("jarvis.dialog")
@@ -148,6 +149,8 @@ def tty_for_pid(pid) -> str | None:
     session started without a terminal — the `sdk-cli` entrypoint on this
     machine is one), and anything unparseable.
     """
+    if sys.platform == "win32":
+        return None                      # niente tty/Terminal.app su Windows
     try:
         pid = int(pid)
     except (TypeError, ValueError):
@@ -353,6 +356,8 @@ async def answer(pid: int, key: str) -> str:
     defensively, for a caller that skipped its own validation — `bad_key`.
     Only `sent` means a keystroke actually left this machine's event queue.
     """
+    if sys.platform == "win32":
+        return NOT_FOUND                 # risposta automatica non supportata
     normalized = normalize_key(key)
     if normalized is None:
         # Before any script is composed: nothing about the rejected key ever

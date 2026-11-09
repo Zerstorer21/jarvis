@@ -1,0 +1,367 @@
+--- a/actions.py	2026-10-13 19:41:49.073546830 +0200
++++ b/actions.py	2026-10-13 20:18:17.186932098 +0200
+@@ -10,6 +10,8 @@
+ import os
+ import re
+ import shutil
++import sys
++from pathlib import Path
+ 
+ log = logging.getLogger("jarvis.actions")
+ 
+@@ -82,6 +84,22 @@
+ 
+ async def open_terminal(command: str = "") -> dict:
+     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
++    if sys.platform == "win32":
++        import subprocess
++        # Windows PowerShell 5.1 non conosce `&&`; PowerShell 7 (pwsh) sì.
++        shell = shutil.which("pwsh") or "powershell.exe"
++        if command and shell == "powershell.exe":
++            command = command.replace(" && ", "; ")
++        argv = [shell, "-NoExit"] + (["-Command", command] if command else [])
++        try:
++            subprocess.Popen(argv, creationflags=subprocess.CREATE_NEW_CONSOLE)
++            ok = True
++        except OSError as e:
++            log.error(f"open_terminal failed: {e}")
++            ok = False
++        return {"success": ok,
++                "confirmation": "Terminal is open, sir." if ok
++                else "I had trouble opening Terminal, sir."}
+     if command:
+         escaped = applescript_escape(command)
+         script = (
+@@ -125,6 +143,8 @@
+     README, so this is a straight line from attacker text to a shell.
+     `tests/test_applescript_url_injection.py` runs the payload.
+     """
++    if sys.platform == "win32":
++        return await asyncio.to_thread(_open_browser_windows, url, browser)
+     escaped_url = applescript_escape(url)
+ 
+     if browser.lower() == "firefox":
+@@ -159,6 +179,41 @@
+     }
+ 
+ 
++_SAFE_FILE_EXT = {".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
++                  ".svg", ".webp", ".txt", ".md"}
++
++
++def _open_browser_windows(url: str, browser: str) -> dict:
++    """Windows: solo http(s) o file:// di tipi innocui, mai via shell."""
++    import subprocess
++    import webbrowser
++    from urllib.parse import unquote, urlparse
++    from urllib.request import url2pathname
++
++    u = urlparse(url)
++    allowed = u.scheme in ("http", "https") or (
++        u.scheme == "file"
++        and Path(url2pathname(unquote(u.path))).suffix.lower() in _SAFE_FILE_EXT)
++    if not allowed:
++        log.error(f"open_browser refused {url!r}")
++        return {"success": False, "confirmation": "I won't open that, sir."}
++
++    candidates = {
++        "chrome": [r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
++                   r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
++                   r"%LocalAppData%\Google\Chrome\Application\chrome.exe"],
++        "firefox": [r"%ProgramFiles%\Mozilla Firefox\firefox.exe"],
++    }.get((browser or "chrome").lower(), [])
++    for candidate in candidates:
++        exe = os.path.expandvars(candidate)
++        if os.path.isfile(exe):
++            subprocess.Popen([exe, url])
++            return {"success": True, "confirmation": "Pulled that up, sir."}
++    ok = webbrowser.open(url)
++    return {"success": ok, "confirmation": "Pulled that up, sir." if ok
++            else "The browser ran into a problem, sir."}
++
++
+ # Keep backward compat
+ async def open_chrome(url: str) -> dict:
+     return await open_browser(url, "chrome")
+@@ -208,6 +263,11 @@
+ 
+ def _vscode_command(path: str) -> list[str] | None:
+     """The argv that opens `path` in VS Code, or None if it is not installed."""
++    if sys.platform == "win32":
++        # Code.exe diretto: `code` su Windows è un .cmd, e passare percorsi
++        # a un batch file espone a injection sugli argomenti.
++        exe = os.path.expandvars(r"%LocalAppData%\Programs\Microsoft VS Code\Code.exe")
++        return [exe, str(path)] if os.path.isfile(exe) else None
+     binary = shutil.which("code")
+     if binary:
+         return [binary, str(path)]
+@@ -221,8 +281,13 @@
+     argv = _vscode_command(path)
+     editor = "VS Code"
+     if argv is None:
+-        argv = ["open", str(path)]
+-        editor = "your editor"
++        if sys.platform == "win32":
++            # Mostra il file in Esplora risorse senza eseguirlo.
++            argv = ["explorer.exe", f"/select,{path}"]
++            editor = "Explorer"
++        else:
++            argv = ["open", str(path)]
++            editor = "your editor"
+ 
+     try:
+         proc = await asyncio.create_subprocess_exec(
+--- a/brain.py	2026-10-13 19:41:49.073546830 +0200
++++ b/brain.py	2026-10-13 20:18:17.185249039 +0200
+@@ -14,6 +14,7 @@
+ import os
+ import re
+ import shlex
++import sys
+ import shutil
+ import time
+ from dataclasses import dataclass, field
+@@ -742,7 +743,9 @@
+ 
+     def command(self) -> list[str]:
+         c = self.config
+-        cmd = shlex.split(self._claude) + [
++        # shlex in modalità POSIX toglie i backslash dai percorsi Windows.
++        base = [self._claude] if sys.platform == "win32" else shlex.split(self._claude)
++        cmd = base + [
+             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+             "--verbose", "--include-partial-messages",
+             "--model", c.model, "--effort", c.effort, "--name", "jarvis",
+--- a/data_paths.py	2026-10-13 19:41:49.074876695 +0200
++++ b/data_paths.py	2026-10-13 19:51:43.907859183 +0200
+@@ -8,6 +8,7 @@
+ import json
+ import logging
+ import os
++import sys
+ import tempfile
+ import time
+ from pathlib import Path
+@@ -374,6 +375,19 @@
+     path = tool_token_path()
+     path.parent.mkdir(parents=True, exist_ok=True)
+ 
++    if sys.platform == "win32":
++        # Windows: niente uid/O_NOFOLLOW/fchmod. La cartella sta sotto
++        # %USERPROFILE%, le cui ACL ereditate la rendono già privata.
++        if path.is_symlink():
++            raise OSError(f"{path} is a symlink, refusing it")
++        if path.exists():
++            existing = path.read_text("utf-8", "ignore").strip()
++            if existing:
++                return existing
++        token = secrets.token_urlsafe(32)
++        path.write_text(token, "utf-8")
++        return token
++
+     token = secrets.token_urlsafe(32)
+     try:
+         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+--- a/dialog.py	2026-10-13 19:41:49.074876695 +0200
++++ b/dialog.py	2026-10-13 19:52:07.972952749 +0200
+@@ -37,6 +37,7 @@
+ import logging
+ import re
+ import shutil
++import sys
+ from dataclasses import dataclass
+ 
+ log = logging.getLogger("jarvis.dialog")
+@@ -148,6 +149,8 @@
+     session started without a terminal — the `sdk-cli` entrypoint on this
+     machine is one), and anything unparseable.
+     """
++    if sys.platform == "win32":
++        return None                      # niente tty/Terminal.app su Windows
+     try:
+         pid = int(pid)
+     except (TypeError, ValueError):
+@@ -353,6 +356,8 @@
+     defensively, for a caller that skipped its own validation — `bad_key`.
+     Only `sent` means a keystroke actually left this machine's event queue.
+     """
++    if sys.platform == "win32":
++        return NOT_FOUND                 # risposta automatica non supportata
+     normalized = normalize_key(key)
+     if normalized is None:
+         # Before any script is composed: nothing about the rejected key ever
+--- a/notifier.py	2026-10-13 19:41:49.107632261 +0200
++++ b/notifier.py	2026-10-13 19:51:43.909546521 +0200
+@@ -69,6 +69,12 @@
+     Center settings, Focus/Do Not Disturb, or per-app permissions can still
+     silently drop the notification even when this returns True.
+     """
++    if sys.platform == "win32":
++        try:
++            import winotify  # noqa: F401
++            return True
++        except ImportError:
++            return False
+     return sys.platform == "darwin" and shutil.which("osascript") is not None
+ 
+ 
+@@ -91,6 +97,14 @@
+         safe_message = _truncate(str(message or ""), _MESSAGE_MAX)
+         safe_subtitle = _truncate(str(subtitle or ""), _SUBTITLE_MAX)
+ 
++        if sys.platform == "win32":
++            from winotify import Notification
++            body = f"{safe_subtitle}\n{safe_message}" if safe_subtitle else safe_message
++            toast = Notification(app_id="JARVIS", title=safe_title, msg=body)
++            await asyncio.wait_for(asyncio.to_thread(toast.show),
++                                   timeout=_TIMEOUT_SECONDS)
++            return True
++
+         try:
+             proc = await asyncio.create_subprocess_exec(
+                 "osascript", "-", safe_title, safe_message, safe_subtitle,
+--- a/run_executor.py	2026-10-13 19:41:49.107632261 +0200
++++ b/run_executor.py	2026-10-13 20:18:17.186579196 +0200
+@@ -16,6 +16,7 @@
+ import math
+ import os
+ import shlex
++import sys
+ import shutil
+ import time
+ from typing import Callable
+@@ -441,7 +442,9 @@
+ 
+     def _command(self, run_id: str, resume_from: str | None,
+                 model: str | None = None) -> list[str]:
+-        base = shlex.split(self._claude_path)
++        # shlex in modalità POSIX toglie i backslash dai percorsi Windows.
++        base = ([self._claude_path] if sys.platform == "win32"
++                else shlex.split(self._claude_path))
+         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
+                       "--session-id", run_id]
+         if resume_from:
+--- a/screen.py	2026-10-13 19:41:49.107632261 +0200
++++ b/screen.py	2026-10-13 19:52:07.969045999 +0200
+@@ -286,6 +286,8 @@
+ 
+     Call this ONLY on a turn the user drove. See the module docstring.
+     """
++    if sys.platform == "win32":
++        return await _capture_windows(display)
+     if screen_recording_granted() is False:
+         raise ScreenError(_NO_PERMISSION)
+ 
+@@ -386,6 +388,8 @@
+     Raises ScreenError when Accessibility is missing. An empty list would have
+     JARVIS say "nothing is open" — a lie with a remedy attached.
+     """
++    if sys.platform == "win32":
++        return await asyncio.to_thread(_list_windows_win)
+     rc, stdout, stderr = await _run("osascript", "-e", _WINDOWS_SCRIPT,
+                                     timeout=WINDOWS_TIMEOUT_SEC)
+     if rc != 0:
+@@ -407,3 +411,71 @@
+         if len(windows) >= MAX_WINDOWS:
+             break
+     return windows
++
++
++# ── Windows ───────────────────────────────────────────────────────────────
++
++async def _capture_windows(display: int | None) -> Shot:
++    """Come capture_screen, con mss + Pillow al posto di screencapture + sips."""
++    import io
++
++    def grab() -> Shot:
++        import mss
++        from PIL import Image
++        with mss.mss() as sct:
++            monitors = sct.monitors          # [0] = tutti insieme, [1..] = singoli
++            idx = display or 1
++            if idx >= len(monitors):
++                raise ScreenError("I can't find that display, sir")
++            raw = sct.grab(monitors[idx])
++        img = Image.frombytes("RGB", raw.size, raw.rgb)
++        img.thumbnail((SHOT_MAX_EDGE, SHOT_MAX_EDGE))
++        sample = img.resize((BLANK_SAMPLE_EDGE, BLANK_SAMPLE_EDGE)).convert("RGB")
++        if _is_blank(list(sample.getdata())):
++            raise ScreenError("your screen came back blank, sir")
++        buf = io.BytesIO()
++        img.save(buf, format="PNG", optimize=True)
++        png = buf.getvalue()
++        if len(png) > MAX_SHOT_BYTES:
++            raise ScreenError("that picture came out far too large to send, sir")
++        return Shot(png=png, width=img.width, height=img.height)
++
++    try:
++        return await asyncio.wait_for(asyncio.to_thread(grab), CAPTURE_TIMEOUT_SEC)
++    except ScreenError:
++        raise
++    except Exception as e:
++        log.warning(f"windows capture failed: {e}")
++        raise ScreenError("I couldn't get a picture of your screen, sir")
++
++
++def _list_windows_win() -> list[Window]:
++    """Finestre visibili con titolo, via EnumWindows (ctypes) + psutil."""
++    import ctypes.wintypes as wt
++    import psutil
++
++    user32 = ctypes.windll.user32
++    front = user32.GetForegroundWindow()
++    found: list[Window] = []
++
++    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
++    def _each(hwnd, _lparam):
++        if not user32.IsWindowVisible(hwnd):
++            return True
++        n = user32.GetWindowTextLengthW(hwnd)
++        if n == 0:
++            return True
++        buf = ctypes.create_unicode_buffer(n + 1)
++        user32.GetWindowTextW(hwnd, buf, n + 1)
++        pid = wt.DWORD()
++        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
++        try:
++            app = psutil.Process(pid.value).name().removesuffix(".exe")
++        except psutil.Error:
++            app = "?"
++        found.append(Window(app=app, title=buf.value, frontmost=(hwnd == front)))
++        return True
++
++    user32.EnumWindows(_each, 0)
++    found.sort(key=lambda w: not w.frontmost)
++    return found[:MAX_WINDOWS]
+--- a/session_steer.py	2026-10-13 19:41:49.108797479 +0200
++++ b/session_steer.py	2026-10-13 20:12:56.137554299 +0200
+@@ -33,6 +33,8 @@
+         return REFUSED
+     if not socket_path or not Path(socket_path).exists():
+         return NOT_LIVE
++    if not hasattr(socket, "AF_UNIX"):
++        return NOT_LIVE           # Python su Windows non espone AF_UNIX
+ 
+     lines = []
+     # What is actually known about this token, recorded so nobody "fixes" it
+--- a/session_watch.py	2026-10-13 19:41:49.108797479 +0200
++++ b/session_watch.py	2026-10-13 19:51:43.909134984 +0200
+@@ -15,6 +15,7 @@
+ 
+ import json
+ import os
++import sys
+ import re
+ from dataclasses import dataclass, field
+ from pathlib import Path
+@@ -50,6 +51,10 @@
+         pid = int(pid)
+         if pid <= 0:
+             return False
++        if sys.platform == "win32":
++            # os.kill(pid, 0) su Windows invia CTRL_C_EVENT: ucciderebbe il processo.
++            import psutil
++            return psutil.pid_exists(pid)
+         os.kill(pid, 0)
+     except (OSError, TypeError, ValueError):
+         return False
